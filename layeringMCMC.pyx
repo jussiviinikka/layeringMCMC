@@ -611,7 +611,7 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
 
     B = map_names(list(scores.keys()), np.random.choice(list(gen_M_layerings(len(scores.keys()), M)), 1)[0])
 
-    def print_step(del_previous=True):
+    def print_step(del_first=True):
         items = [
             B_probs,
             acceptance_probs,
@@ -622,9 +622,9 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
             DAGs,
         ]
         print(",".join(["{}"]*len(items)).format(*([item[-1] for item in items[:-2]] + [structure_to_str(item[-1]) for item in items[-2:]])))
-        if del_previous:
+        if del_first:
             for item in items:
-                del item[-1]
+                del item[0]
 
     B_probs = list()
     Bs = list()
@@ -657,7 +657,7 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
     DAG_probs.append(DAG_prob)
 
     if print_steps:
-        print_step(del_previous=False)
+        print_step(del_first=False)
         
     for i in range(iterations-1):
 
