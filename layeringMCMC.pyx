@@ -667,8 +667,10 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
             t["parentsums"].append(0)
             t["posterior"].append(0)
             acceptance_probs.append(1)  # ?
-            DAGs.append(DAGs[-1])
-            DAG_probs.append(DAG_probs[-1])
+
+            DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
+            DAGs.append(DAG)
+            DAG_probs.append(DAG_prob)
 
             if print_steps:
                 print_step()
@@ -678,14 +680,14 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
             B_prime, q, q_rev = relocate_uniform(B, M)
 
             t["parentsums"].append(time.process_time())
-            tau_hat = parentsums(B_prime, M, max_indegree, scores)
+            tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
             t["parentsums"][-1] = time.process_time() - t["parentsums"][-1]
 
             prob_B = B_probs[-1]
 
             t["posterior"].append(time.process_time())
-            g = pi_B(B_prime, M, max_indegree, scores, tau_hat, return_all=True)
-            prob_B_prime = g[0][frozenset()][frozenset()]
+            g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
+            prob_B_prime = g_prime[0][frozenset()][frozenset()]
             t["posterior"][-1] = time.process_time() - t["posterior"][-1]
 
             acceptance_probs.append(min(1, np.exp(prob_B_prime - prob_B)*q_rev/q))
@@ -693,6 +695,8 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
                 Bs.append(B_prime)
                 B_probs.append(prob_B_prime)
                 B = B_prime
+                tau_hat = tau_hat_prime
+                g = g_prime
 
                 DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
                 DAGs.append(DAG)
@@ -702,8 +706,9 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
                 Bs.append(B)
                 B_probs.append(prob_B)
 
-                DAGs.append(DAGs[-1])
-                DAG_probs.append(DAG_probs[-1])
+                DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
+                DAGs.append(DAG)
+                DAG_probs.append(DAG_prob)
 
             if print_steps:
                 print_step()
