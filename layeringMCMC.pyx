@@ -613,18 +613,18 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
 
     def print_step(del_first=True):
         items = [
-            B_probs,
-            acceptance_probs,
-            DAG_probs,
-            t["parentsums"],
-            t["posterior"],
-            Bs,
-            DAGs,
+            (B_probs, None),
+            (acceptance_probs, None),
+            (DAG_probs, None),
+            (t["parentsums"], None),
+            (t["posterior"], None),
+            (Bs, structure_to_str),
+            (DAGs, structure_to_str),
         ]
-        print(",".join(["{}"]*len(items)).format(*([item[-1] for item in items[:-2]] + [structure_to_str(item[-1]) for item in items[-2:]])))
+        print(",".join(["{}"]*len(items)).format(*([i[0][-1] if i[1] is None else i[1](i[0][-1])  for i in items])))
         if del_first:
             for item in items:
-                del item[0]
+                del item[0][0]
 
     B_probs = list()
     Bs = list()
