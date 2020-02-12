@@ -333,6 +333,38 @@ def valid_targets(b, j, M):
     return valids
 
 
+def swap(B, M):
+    """Swaps the layer of two nodes in adjacent layers by sampling uniformly at random:
+    1. j between 1 and l-1
+    2. nodes in B[j] and B[j+1]
+    and finally swapping the layers of the chosen nodes.
+
+    The proposed layering is valid and cannot be reached by the relocate function with one step.
+    The proposal probability is symmetric.
+
+    Args:
+       B (list): Initial state of the layering for the relocation transition
+       M (int):  Specifies the space of Bs
+
+    Returns:
+        Proposed new M-layering, proposal probability and reverse proposal probability
+    """
+
+    j = np.random.randint(len(B) - 1)
+    v_1 = np.random.choice(list(B[j]))
+    v_2 = np.random.choice(list(B[j+1]))
+    B_prime = list()
+    for i in range(len(B)):
+        if i == j:
+            B_prime.append(B[i].difference({v_1}).union({v_2}))
+        elif i == j+1:
+            B_prime.append(B[i].difference({v_2}).union({v_1}))
+        else:
+            B_prime.append(B[i])
+    q = 1/((len(B)-1)*len(B[j])*len(B[j+1]))
+    return B_prime, q, q
+
+
 def relocate_uniform(B, M):
     """Relocates a single node in the input M-layering B by choosing uniformly at random:
     1. a source part from among the valid possibilities,
@@ -358,7 +390,7 @@ def relocate_uniform(B, M):
     possible_targets = valid_targets(b, source, M)
     target = np.random.choice(np.nonzero(possible_targets)[0])
     v = np.random.choice(list(B[source]))
-    B_prime = [part.difference({v}) for part in B]
+    B_prime = [layer.difference({v}) for layer in B]
 
     # Add v to target
     rev_source = 0
@@ -604,57 +636,60 @@ def relocate_validate(B, M):
     return B_prime, q, q_rev
 
 
-def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=False, seed=None):
+def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
 
     if seed is not None:
         np.random.seed(seed)
 
-    B = map_names(list(scores.keys()), np.random.choice(list(gen_M_layerings(len(scores.keys()), M)), 1)[0])
-
     def print_step(del_first=True):
-        items = [
-            (B_probs, None),
-            (acceptance_probs, None),
-            (DAG_probs, None),
-            (t["parentsums"], None),
-            (t["posterior"], None),
-            (Bs, structure_to_str),
-            (DAGs, structure_to_str),
-        ]
-        print(",".join(["{}"]*len(items)).format(*([i[0][-1] if i[1] is None else i[1](i[0][-1])  for i in items])))
+        format_func = {"B": structure_to_str,
+                       "DAG": structure_to_str}
+        print(",".join(["{}"]*len(stats_keys)).format(*[stats[key][-1]
+                                                        if key not in format_func
+                                                        else format_func[key](stats[key][-1])
+                                                        for key in stats_keys]))
         if del_first:
-            for item in items:
-                del item[0][0]
+            for key in stats_keys:
+                del stats[key][0]
 
-    B_probs = list()
-    Bs = list()
-    DAG_probs = list()
-    DAGs = list()
-    acceptance_probs = list()
+    def update_stats(B_prob, B, DAG_prob, DAG, accepted, acceptance_prob,
+                     move, t_parentsums, t_posterior):
+        stats["B_prob"].append(B_prob)
+        stats["B"].append(B)
+        stats["DAG"].append(DAG)
+        stats["DAG_prob"].append(DAG_prob)
+        stats["t_parentsums"].append(t_parentsums)
+        stats["t_posterior"].append(t_posterior)
+        stats["accepted"].append(accepted)
+        stats["acceptance_prob"].append(acceptance_prob)
+        stats["move"].append(move)
 
-    # For reporting time used by various functions
-    t = dict()
-    t["parentsums"] = list()
-    t["posterior"] = list()
+    B = map_names(list(scores.keys()),
+                  np.random.choice(list(gen_M_layerings(len(scores.keys()), M)), 1)[0])
 
     stay_prob = 0.01
 
-    t["parentsums"].append(time.process_time())
+    stats_keys = ["B_prob", "B", "DAG_prob", "DAG",
+                  "accepted", "acceptance_prob", "move",
+                  "t_parentsums", "t_posterior"]
+    stats = {key: list() for key in stats_keys}
+
+    t_psum = time.process_time()
     tau_hat = parentsums(B, M, max_indegree, scores)
-    t["parentsums"][-1] = time.process_time() - t["parentsums"][-1]
+    t_psum = time.process_time() - t_psum
 
-    t["posterior"].append(time.process_time())
+    t_pos = time.process_time()
     g = pi_B(B, M, max_indegree, scores, tau_hat, return_all=True)
-    prob_B = g[0][frozenset()][frozenset()]
-    t["posterior"][-1] = time.process_time() - t["posterior"][-1]
+    B_prob = g[0][frozenset()][frozenset()]
+    t_pos = time.process_time() - t_pos
 
-    B_probs.append(prob_B)
-    Bs.append(B)
-    acceptance_probs.append(1)
+    moves = [relocate_uniform, swap]
+    moveprob_counts = np.array([10, 10])
 
-    DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
-    DAGs.append(DAG)
-    DAG_probs.append(DAG_prob)
+    DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores),
+                               scores, max_indegree)
+
+    update_stats(B_prob, B, DAG_prob, DAG, None, None, None, t_psum, t_pos)
 
     if print_steps:
         print_step(del_first=False)
@@ -662,60 +697,42 @@ def MCMC(M, iterations, max_indegree, scores, return_all=False, print_steps=Fals
     for i in range(iterations-1):
 
         if np.random.rand() < stay_prob:
-            Bs.append(B)
-            B_probs.append(B_probs[-1])
-            t["parentsums"].append(0)
-            t["posterior"].append(0)
-            acceptance_probs.append(1)  # ?
-
             DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
-            DAGs.append(DAG)
-            DAG_probs.append(DAG_prob)
-
-            if print_steps:
-                print_step()
+            update_stats(B_prob, B, DAG_prob, DAG, None, None, None, None, None)
 
         else:
 
-            B_prime, q, q_rev = relocate_uniform(B, M)
+            move = np.random.choice(moves, p=moveprob_counts/sum(moveprob_counts))
+            B_prime, q, q_rev = move(B, M)
 
-            t["parentsums"].append(time.process_time())
+            t_psum = time.process_time()
             tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
-            t["parentsums"][-1] = time.process_time() - t["parentsums"][-1]
+            t_psum = time.process_time() - t_psum
 
-            prob_B = B_probs[-1]
+            B_prob = stats["B_prob"][-1]
 
-            t["posterior"].append(time.process_time())
+            t_pos = time.process_time()
             g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
-            prob_B_prime = g_prime[0][frozenset()][frozenset()]
-            t["posterior"][-1] = time.process_time() - t["posterior"][-1]
+            B_prime_prob = g_prime[0][frozenset()][frozenset()]
+            t_pos = time.process_time() - t_pos
 
-            acceptance_probs.append(min(1, np.exp(prob_B_prime - prob_B)*q_rev/q))
-            if np.random.rand() < acceptance_probs[-1]:
-                Bs.append(B_prime)
-                B_probs.append(prob_B_prime)
+            acc_prob = min(1, np.exp(B_prime_prob - B_prob)*q_rev/q)
+
+            if np.random.rand() < acc_prob:
                 B = B_prime
                 tau_hat = tau_hat_prime
                 g = g_prime
-
                 DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
-                DAGs.append(DAG)
-                DAG_probs.append(DAG_prob)
+                update_stats(B_prime_prob, B_prime, DAG_prob, DAG, 1, acc_prob, move.__name__, t_psum, t_pos)
 
             else:
-                Bs.append(B)
-                B_probs.append(prob_B)
-
                 DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
-                DAGs.append(DAG)
-                DAG_probs.append(DAG_prob)
+                update_stats(B_prob, B, DAG_prob, DAG, 0, acc_prob, None, t_psum, t_pos)
 
-            if print_steps:
-                print_step()
+        if print_steps:
+            print_step()
 
-    if return_all:
-        return B_probs, Bs, acceptance_probs, t, DAG_probs
-    return B_probs, Bs
+    return stats
 
 
 def generate_partition(B, M, tau_hat, g, pi_v):
