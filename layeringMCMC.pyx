@@ -333,7 +333,155 @@ def valid_targets(b, j, M):
     return valids
 
 
-def swap(B, M):
+def R_score(B, R, tau_hat, pi_v):
+    score = sum(pi_v[v][frozenset()] for v in R[0])
+    B_sum = len(B[0])
+    R_sum = len(R[0])
+    j = 0
+    k = 0
+    for i in range(1, len(R)):
+        R_sum += len(R[i])
+        if R_sum > B_sum:
+            j += 1
+            k = i
+            B_sum += len(B[j])
+        if i == k:
+            i_score = sum(tau_hat[v][frozenset()] for v in R[i])
+        else:
+            i_score = sum(logminus(tau_hat[v][frozenset().union(*R[k:i])], tau_hat[v][frozenset().union(*R[k:i-1])]) for v in R[i])
+        score += i_score
+    return score
+
+
+def R_to_B(R, M):
+    B = list()
+    B_layer = frozenset()
+    for i in range(len(R)):
+        if len(B_layer) + len(R[i]) <= M:
+            B_layer = B_layer.union(R[i])
+        else:
+            B.append(B_layer)
+            B_layer = R[i]
+    B.append(B_layer)
+    return B
+
+
+def R_basic_move(**kwargs):
+
+    def valid():
+        return True
+
+    R = kwargs["R"]
+
+    if "validate" in kwargs and kwargs["validate"] is True:
+        return valid()
+
+    m = len(R)
+    sum_binoms = [sum([nCr(len(R[i]), c) for c in range(1, len(R[i]))]) for i in range(m)]
+    nbd = m - 1 + sum(sum_binoms)
+    q = 1/nbd
+
+    j = np.random.choice(range(1, nbd+1))
+
+    R_prime = list()
+    if j < m:
+        R_prime = [R[i] for i in range(j-1)] + [R[j-1].union(R[j])] + [R[i] for i in range(min(m, j+1), m)]
+        return R_prime, q, q
+
+    sum_binoms = [sum(sum_binoms[:i]) for i in range(1, len(sum_binoms)+1)]
+    i_star = [m-1 + sum_binoms[i] for i in range(len(sum_binoms)) if m-1 + sum_binoms[i] < j]
+    i_star = len(i_star)
+
+    c_star = [nCr(len(R[i_star]), c) for c in range(1, len(R[i_star])+1)]
+    c_star = [sum(c_star[:i]) for i in range(1, len(c_star)+1)]
+
+    c_star = [m-1 + sum_binoms[i_star-1] + c_star[i] for i in range(len(c_star))
+               if m-1 + sum_binoms[i_star-1] + c_star[i] < j]
+    c_star = len(c_star)+1
+
+    nodes = np.random.choice(list(R[i_star]), c_star)
+
+    R_prime = [R[i] for i in range(i_star)] + [frozenset(nodes)]
+    R_prime += [R[i_star].difference(nodes)] + [R[i] for i in range(min(m, i_star+1), m)]
+
+    return R_prime, q, q
+
+
+def R_swap_any(**kwargs):
+
+    def valid():
+        return len(R) > 1
+
+    R = kwargs["R"]
+
+    if "validate" in kwargs and kwargs["validate"] is True:
+        return valid()
+
+    j, k = np.random.choice(range(len(R)), 2, replace=False)
+    v_j = np.random.choice(list(R[j]))
+    v_k = np.random.choice(list(R[k]))
+    R_prime = list()
+    for i in range(len(R)):
+        if i == j:
+            R_prime.append(R[i].difference({v_j}).union({v_k}))
+        elif i == k:
+            R_prime.append(R[i].difference({v_k}).union({v_j}))
+        else:
+            R_prime.append(R[i])
+
+    q = 1/(nCr(len(R), 2)*len(R[j])*len(R[k]))
+
+    return R_prime, q, q
+
+
+def B_swap_nonadjacent(**kwargs):
+    # TODO update docstring to reflect new behaviour
+    """Swaps the layer of two nodes in different layers by sampling uniformly at random:
+    1. j and k, j != k
+    2. nodes in B[j] and B[k]
+    and finally swapping the layers of the chosen nodes.
+
+    The proposed layering is valid and cannot be reached by the relocate function with one step.
+    The proposal probability is symmetric.
+
+    Args:
+       B (list): Initial state of the layering for the relocation transition
+
+    Returns:
+        Proposed new M-layering, proposal probability and reverse proposal probability
+    """
+
+    def valid():
+        return len(B) > 2
+
+    B = kwargs["B"]
+
+    if "validate" in kwargs and kwargs["validate"] is True:
+        return valid()
+
+    if len(B) == 3:
+        j = np.random.choice([0,2])
+    else:
+        j = np.random.choice(range(len(B)))
+    k = np.random.choice(np.setdiff1d(np.array(range(len(B))), [max(0, j-1), j, min(len(B)-1, j+1)]))
+    v_j= np.random.choice(list(B[j]))
+    v_k = np.random.choice(list(B[k]))
+    B_prime = list()
+    for i in range(len(B)):
+        if i == j:
+            B_prime.append(B[i].difference({v_j}).union({v_k}))
+        elif i == k:
+            B_prime.append(B[i].difference({v_k}).union({v_j}))
+        else:
+            B_prime.append(B[i])
+
+    n_opts = 2*(len(B)-2) + (len(B)-2)*(len(B)-3)/2
+
+    q = 1/(n_opts*len(B[j])*len(B[k]))
+    return B_prime, q, q
+
+
+def B_swap_adjacent(**kwargs):
     """Swaps the layer of two nodes in adjacent layers by sampling uniformly at random:
     1. j between 1 and l-1
     2. nodes in B[j] and B[j+1]
@@ -344,11 +492,17 @@ def swap(B, M):
 
     Args:
        B (list): Initial state of the layering for the relocation transition
-       M (int):  Specifies the space of Bs
 
     Returns:
         Proposed new M-layering, proposal probability and reverse proposal probability
     """
+    def valid():
+        return len(B) > 1
+
+    B = kwargs["B"]
+
+    if "validate" in kwargs and kwargs["validate"] is True:
+        return valid()
 
     j = np.random.randint(len(B) - 1)
     v_1 = np.random.choice(list(B[j]))
@@ -365,7 +519,59 @@ def swap(B, M):
     return B_prime, q, q
 
 
-def relocate_uniform(B, M):
+def B_relocate_many(**kwargs):
+
+    def valid():
+        return len(B) > 1 and len(valid_sources) > 0
+
+    B = kwargs["B"]
+    M = kwargs["M"]
+
+    valid_sources = [i for i in range(len(B)) if len(B[i]) > 1]
+
+    if "validate" in kwargs and kwargs["validate"] is True:
+        return valid()
+
+    B_prime = [frozenset()]
+
+    while not valid_layering(B_prime, M):
+
+        source = np.random.choice(valid_sources)
+        target = np.random.choice(list(set(range(2*len(B)+1)).difference({source*2+1})))
+        size = np.random.randint(2, len(B[source])+1)
+        nodes = np.random.choice(list(B[source]), size)
+
+        B_prime = [layer.difference({*nodes}) for layer in B]
+
+        # Add nodes to target
+        rev_source = 0
+        if target % 2 == 1:  # add to existing part
+            B_prime[target//2] = B_prime[target//2].union({*nodes})
+            rev_source = target//2
+        else:  # add to new part
+            if target == 0:
+                B_prime = [frozenset({*nodes})] + B_prime
+                rev_source = 0
+            else:  # new part after target//2
+                B_prime = B_prime[0:target//2+1] + [frozenset({*nodes})] + B_prime[target//2+1:]
+                rev_source = target//2
+
+        # delete possible 0 layers and adjust rev_source accordingly
+        for i in range(len(B_prime)):
+            if len(B_prime[i]) == 0:
+                del B_prime[i]
+                if i < rev_source:
+                    rev_source -= 1
+                break  # there can be max 1 0-part
+
+    valid_rev_sources = [i for i in range(len(B_prime)) if len(B_prime[i]) > 1]
+    q = 1/(len(valid_sources)*len(B[source])*(2*len(B)+1))
+    q_rev = 1/(len(valid_rev_sources)*len(B_prime[rev_source])*(2*len(B_prime)+1))
+
+    return B_prime, q, q_rev
+
+
+def B_relocate_one(**kwargs):
     """Relocates a single node in the input M-layering B by choosing uniformly at random:
     1. a source part from among the valid possibilities,
     2. a node within the source part,
@@ -383,6 +589,14 @@ def relocate_uniform(B, M):
     Returns:
         Proposed new M-layering, proposal probability and reverse proposal probability
     """
+    def valid():
+        return len(B) > 1
+
+    B = kwargs["B"]
+    M = kwargs["M"]
+
+    if "validate" in kwargs and kwargs["validate"] is True:
+        return valid()
 
     b = [len(part) for part in B]
     possible_sources = valid_sources(b, M)
@@ -652,8 +866,9 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
             for key in stats_keys:
                 del stats[key][0]
 
-    def update_stats(B_prob, B, DAG_prob, DAG, accepted, acceptance_prob,
-                     move, t_parentsums, t_posterior):
+    def update_stats(B_prob, DAG_prob, B, DAG,
+                     acceptance_prob, accepted, move,
+                     t_parentsums, t_posterior):
         stats["B_prob"].append(B_prob)
         stats["B"].append(B)
         stats["DAG"].append(DAG)
@@ -669,8 +884,8 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
 
     stay_prob = 0.01
 
-    stats_keys = ["B_prob", "B", "DAG_prob", "DAG",
-                  "accepted", "acceptance_prob", "move",
+    stats_keys = ["B_prob", "DAG_prob", "B", "DAG",
+                  "acceptance_prob", "accepted", "move",
                   "t_parentsums", "t_posterior"]
     stats = {key: list() for key in stats_keys}
 
@@ -683,13 +898,15 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
     B_prob = g[0][frozenset()][frozenset()]
     t_pos = time.process_time() - t_pos
 
-    moves = [relocate_uniform, swap]
-    moveprob_counts = np.array([10, 10])
+    B_moves = [B_relocate_one, B_relocate_many, B_swap_adjacent, B_swap_nonadjacent]
+    R_moves = [R_basic_move, R_swap_any]
+    moves = B_moves + R_moves
+    moveprob_counts = np.array([10, 10, 10, 10, 10, 10])
 
-    DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores),
-                               scores, max_indegree)
+    R = generate_partition(B, M, tau_hat, g, scores)
+    DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
 
-    update_stats(B_prob, B, DAG_prob, DAG, None, None, None, t_psum, t_pos)
+    update_stats(B_prob, DAG_prob, B, DAG, None, None, None, t_psum, t_pos)
 
     if print_steps:
         print_step(del_first=False)
@@ -697,37 +914,81 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
     for i in range(iterations-1):
 
         if np.random.rand() < stay_prob:
-            DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
-            update_stats(B_prob, B, DAG_prob, DAG, None, None, None, None, None)
+            R = generate_partition(B, M, tau_hat, g, scores)
+            DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
+            update_stats(B_prob, DAG_prob, B, DAG, None, None, None, None, None)
 
         else:
 
             move = np.random.choice(moves, p=moveprob_counts/sum(moveprob_counts))
-            B_prime, q, q_rev = move(B, M)
 
-            t_psum = time.process_time()
-            tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
-            t_psum = time.process_time() - t_psum
+            if not move(B=B, M=M, R=R, validate=True):
+                R = generate_partition(B, M, tau_hat, g, scores)
+                DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
+                update_stats(B_prob, DAG_prob, B, DAG, None, None, "invalid_" + move.__name__, None, None)
+                if print_steps:
+                    print_step()
+                continue
 
-            B_prob = stats["B_prob"][-1]
+            if move in B_moves:
 
-            t_pos = time.process_time()
-            g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
-            B_prime_prob = g_prime[0][frozenset()][frozenset()]
-            t_pos = time.process_time() - t_pos
+                B_prime, q, q_rev = move(B=B, M=M)
 
-            acc_prob = min(1, np.exp(B_prime_prob - B_prob)*q_rev/q)
+                t_psum = time.process_time()
+                tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
+                t_psum = time.process_time() - t_psum
+
+                B_prob = stats["B_prob"][-1]
+
+                t_pos = time.process_time()
+                g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
+                B_prime_prob = g_prime[0][frozenset()][frozenset()]
+                t_pos = time.process_time() - t_pos
+
+                acc_prob = np.exp(B_prime_prob - B_prob)*q_rev/q
+
+
+            elif move in R_moves:
+
+                R_prime, q, q_rev = move(R=R)
+
+                B_prime = R_to_B(R_prime, M)
+
+                if B_prime == B:
+                    R = generate_partition(B, M, tau_hat, g, scores)
+                    DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
+                    update_stats(B_prob, DAG_prob, B, DAG, None, None, "identical_" + move.__name__, None, None)
+                    if print_steps:
+                        print_step()
+                    continue
+
+                t_psum = time.process_time()
+                tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
+                t_psum = time.process_time() - t_psum
+
+                R_prob = R_score(B, R, tau_hat, scores)
+                R_prime_prob = R_score(B_prime, R_prime, tau_hat_prime, scores)
+
+                acc_prob = np.exp(R_prime_prob - R_prob)*q_rev/q
 
             if np.random.rand() < acc_prob:
+
+                t_pos = time.process_time()
+                g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
+                B_prime_prob = g_prime[0][frozenset()][frozenset()]
+                t_pos = time.process_time() - t_pos
+
                 B = B_prime
                 tau_hat = tau_hat_prime
                 g = g_prime
-                DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
-                update_stats(B_prime_prob, B_prime, DAG_prob, DAG, 1, acc_prob, move.__name__, t_psum, t_pos)
+                R = generate_partition(B, M, tau_hat, g, scores)
+                DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
+                update_stats(B_prime_prob, DAG_prob, B_prime, DAG, acc_prob, 1, move.__name__, t_psum, t_pos)
 
             else:
-                DAG, DAG_prob = sample_DAG(generate_partition(B, M, tau_hat, g, scores), scores, max_indegree)
-                update_stats(B_prob, B, DAG_prob, DAG, 0, acc_prob, None, t_psum, t_pos)
+                R = generate_partition(B, M, tau_hat, g, scores)
+                DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
+                update_stats(B_prob, DAG_prob, B, DAG, acc_prob, 0, move.__name__, t_psum, t_pos)
 
         if print_steps:
             print_step()
