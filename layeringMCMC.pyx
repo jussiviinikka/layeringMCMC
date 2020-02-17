@@ -334,6 +334,38 @@ def valid_targets(b, j, M):
 
 
 def R_score(B, R, tau_hat, pi_v):
+def possible_psets(U, T, max_indegree):
+    if not U:
+        yield frozenset()
+    for required in subsets(T, 1, max(1, max_indegree)):
+        for additional in subsets(U.difference(T), 0, max_indegree - len(required)):
+            yield frozenset(required).union(additional)
+
+
+def score_v(v, pset, scores):
+    return scores[v][pset]
+
+
+def hat_pi(v, U, T, scores, max_indegree):
+    return np.logaddexp.reduce([score_v(v, pset, scores) for pset in possible_psets(U, T, max_indegree)])
+
+
+def f(U, T, S, scores, max_indegree):
+    hat_pi_sum = 0
+    for v in S:
+        hat_pi_sum += hat_pi(v, U, T, scores, max_indegree)
+    return hat_pi_sum
+
+
+def pi_R(R, scores, max_indegree):
+    f_sum = 0
+    for i in range(len(R)):
+        f_sum += f(set().union(*R[:i]),
+                    [R[i-1] if i-1>-1 else set()][0],
+                    R[i], scores, max_indegree)
+    return f_sum
+
+
     score = sum(pi_v[v][frozenset()] for v in R[0])
     B_sum = len(B[0])
     R_sum = len(R[0])
@@ -534,35 +566,33 @@ def B_relocate_many(**kwargs):
 
     B_prime = [frozenset()]
 
-    while not valid_layering(B_prime, M):
+    source = np.random.choice(valid_sources)
+    target = np.random.choice(list(set(range(2*len(B)+1)).difference({source*2+1})))
+    size = np.random.randint(2, len(B[source])+1)
+    nodes = np.random.choice(list(B[source]), size)
 
-        source = np.random.choice(valid_sources)
-        target = np.random.choice(list(set(range(2*len(B)+1)).difference({source*2+1})))
-        size = np.random.randint(2, len(B[source])+1)
-        nodes = np.random.choice(list(B[source]), size)
+    B_prime = [layer.difference({*nodes}) for layer in B]
 
-        B_prime = [layer.difference({*nodes}) for layer in B]
-
-        # Add nodes to target
-        rev_source = 0
-        if target % 2 == 1:  # add to existing part
-            B_prime[target//2] = B_prime[target//2].union({*nodes})
+    # Add nodes to target
+    rev_source = 0
+    if target % 2 == 1:  # add to existing part
+        B_prime[target//2] = B_prime[target//2].union({*nodes})
+        rev_source = target//2
+    else:  # add to new part
+        if target == 0:
+            B_prime = [frozenset({*nodes})] + B_prime
+            rev_source = 0
+        else:  # new part after target//2
+            B_prime = B_prime[0:target//2+1] + [frozenset({*nodes})] + B_prime[target//2+1:]
             rev_source = target//2
-        else:  # add to new part
-            if target == 0:
-                B_prime = [frozenset({*nodes})] + B_prime
-                rev_source = 0
-            else:  # new part after target//2
-                B_prime = B_prime[0:target//2+1] + [frozenset({*nodes})] + B_prime[target//2+1:]
-                rev_source = target//2
 
-        # delete possible 0 layers and adjust rev_source accordingly
-        for i in range(len(B_prime)):
-            if len(B_prime[i]) == 0:
-                del B_prime[i]
-                if i < rev_source:
-                    rev_source -= 1
-                break  # there can be max 1 0-part
+    # delete possible 0 layers and adjust rev_source accordingly
+    for i in range(len(B_prime)):
+        if len(B_prime[i]) == 0:
+            del B_prime[i]
+            if i < rev_source:
+                rev_source -= 1
+            break  # there can be max 1 0-part
 
     valid_rev_sources = [i for i in range(len(B_prime)) if len(B_prime[i]) > 1]
     q = 1/(len(valid_sources)*len(B[source])*(2*len(B)+1))
@@ -901,7 +931,7 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
     B_moves = [B_relocate_one, B_relocate_many, B_swap_adjacent, B_swap_nonadjacent]
     R_moves = [R_basic_move, R_swap_any]
     moves = B_moves + R_moves
-    moveprob_counts = np.array([10, 10, 10, 10, 10, 10])
+    moveprob_counts = np.array([10, 10, 10, 10, 5, 5])
 
     R = generate_partition(B, M, tau_hat, g, scores)
     DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
@@ -916,7 +946,7 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
         if np.random.rand() < stay_prob:
             R = generate_partition(B, M, tau_hat, g, scores)
             DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
-            update_stats(B_prob, DAG_prob, B, DAG, None, None, None, None, None)
+            update_stats(B_prob, DAG_prob, B, DAG, None, None, "stay", None, None)
 
         else:
 
@@ -925,7 +955,7 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
             if not move(B=B, M=M, R=R, validate=True):
                 R = generate_partition(B, M, tau_hat, g, scores)
                 DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
-                update_stats(B_prob, DAG_prob, B, DAG, None, None, "invalid_" + move.__name__, None, None)
+                update_stats(B_prob, DAG_prob, B, DAG, None, None, "invalid_input_" + move.__name__, None, None)
                 if print_steps:
                     print_step()
                 continue
@@ -934,11 +964,19 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
 
                 B_prime, q, q_rev = move(B=B, M=M)
 
+                B_prob = stats["B_prob"][-1]
+
+                if not valid_layering(B_prime, M):
+                    R = generate_partition(B, M, tau_hat, g, scores)
+                    DAG, DAG_prob = sample_DAG(R, scores, max_indegree)
+                    update_stats(B_prob, DAG_prob, B, DAG, None, None, "invalid_output_" + move.__name__, None, None)
+                    if print_steps:
+                        print_step()
+                    continue
+
                 t_psum = time.process_time()
                 tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
                 t_psum = time.process_time() - t_psum
-
-                B_prob = stats["B_prob"][-1]
 
                 t_pos = time.process_time()
                 g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
@@ -966,10 +1004,16 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
                 tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
                 t_psum = time.process_time() - t_psum
 
-                R_prob = R_score(B, R, tau_hat, scores)
-                R_prime_prob = R_score(B_prime, R_prime, tau_hat_prime, scores)
+                #R_prob = R_score(B, R, tau_hat, scores, "R_prob")
+                #R_prime_prob = R_score(B_prime, R_prime, tau_hat_prime, scores, "R_prime_prob")
+
+                R_prob = pi_R(R, scores, max_indegree)
+                R_prime_prob = pi_R(R_prime, scores, max_indegree)
 
                 acc_prob = np.exp(R_prime_prob - R_prob)*q_rev/q
+
+            # elif move in DAG_moves:
+            #    DAG_prime, q, q_rev = move(DAG=DAG, scores=scores)
 
             if np.random.rand() < acc_prob:
 
