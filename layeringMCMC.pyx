@@ -280,7 +280,7 @@ def valid_sources(b, M):
                 # in first case have to add v to prev, in second case have to add v to next
                 valids[j] = True
         else:
-            # if len(B[j]) == 1 part disappears
+            # if len(b[j]) == 1 part disappears
             valids[j] = True
 
     return valids
@@ -333,7 +333,6 @@ def valid_targets(b, j, M):
     return valids
 
 
-def R_score(B, R, tau_hat, pi_v):
 def possible_psets(U, T, max_indegree):
     if not U:
         yield frozenset()
@@ -366,29 +365,10 @@ def pi_R(R, scores, max_indegree):
     return f_sum
 
 
-    score = sum(pi_v[v][frozenset()] for v in R[0])
-    B_sum = len(B[0])
-    R_sum = len(R[0])
-    j = 0
-    k = 0
-    for i in range(1, len(R)):
-        R_sum += len(R[i])
-        if R_sum > B_sum:
-            j += 1
-            k = i
-            B_sum += len(B[j])
-        if i == k:
-            i_score = sum(tau_hat[v][frozenset()] for v in R[i])
-        else:
-            i_score = sum(logminus(tau_hat[v][frozenset().union(*R[k:i])], tau_hat[v][frozenset().union(*R[k:i-1])]) for v in R[i])
-        score += i_score
-    return score
-
-
 def R_to_B(R, M):
     B = list()
-    B_layer = frozenset()
-    for i in range(len(R)):
+    B_layer = R[0]
+    for i in range(1, len(R)):
         if len(B_layer) + len(R[i]) <= M:
             B_layer = B_layer.union(R[i])
         else:
@@ -988,11 +968,9 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
 
                 acc_prob = np.exp(B_prime_prob - B_prob)*q_rev/q
 
-
             elif move in R_moves:
 
                 R_prime, q, q_rev = move(R=R)
-
                 B_prime = R_to_B(R_prime, M)
 
                 if B_prime == B:
@@ -1007,16 +985,10 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
                 tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
                 t_psum = time.process_time() - t_psum
 
-                #R_prob = R_score(B, R, tau_hat, scores, "R_prob")
-                #R_prime_prob = R_score(B_prime, R_prime, tau_hat_prime, scores, "R_prime_prob")
-
                 R_prob = pi_R(R, scores, max_indegree)
                 R_prime_prob = pi_R(R_prime, scores, max_indegree)
 
                 acc_prob = np.exp(R_prime_prob - R_prob)*q_rev/q
-
-            # elif move in DAG_moves:
-            #    DAG_prime, q, q_rev = move(DAG=DAG, scores=scores)
 
             if np.random.rand() < acc_prob:
 
@@ -1103,3 +1075,98 @@ def generate_partition(B, M, tau_hat, g, pi_v):
 
     return R
 
+
+def partition(matrix):
+    """Partition from adjacency matrix
+    """
+    partitions = list()
+    indices = np.arange(0, len(matrix))
+    while True:
+        pmask = np.sum(matrix, axis=0) == 0
+        if not any(pmask):
+            break
+        matrix = matrix[:, pmask == False][pmask == False, :]
+        partitions.append(indices[pmask])
+        indices = indices[pmask == False]
+    return partitions
+
+
+def DAG_str_to_adjmat(DAG_str):
+
+    node_psets = [np.array([int(node) for node in node_pset.split()])
+                  for node_pset in DAG_str.split("|")]
+
+    min_node = min([min(node_pset) for node_pset in node_psets])
+    max_node = max([max(node_pset) for node_pset in node_psets])
+
+    if min_node == 1:
+        node_psets = [node_pset - 1 for node_pset in node_psets]
+    else:
+        max_node += 1
+
+    matrix = np.zeros((max_node, max_node))
+
+    for node_pset in node_psets:
+        node = node_pset[0]
+        parents = node_pset[1:]
+        for parent in parents:
+            matrix[parent, node] = 1
+
+    return matrix
+
+
+def edge_posteriors(pset_posteriors_path):
+
+    posteriors = read_jkl(pset_posteriors_path)
+    for node in posteriors:
+        normalizer = np.logaddexp.reduce(list(posteriors[node].values()))
+        for pset in posteriors[node]:
+            posteriors[node][pset] -= normalizer
+
+    n_vars = len(posteriors.keys())
+
+    if min(posteriors.keys()) == 1:
+        adj = -1
+    else:
+        adj = 0
+
+    edge_posteriors = dict({v: dict({v: list() for v in range(n_vars)}) for v in range(n_vars)})
+
+    for child in posteriors:
+        for pset in posteriors[child]:
+            for parent in pset:
+                edge_posteriors[parent + adj][child + adj].append(posteriors[child][pset])
+
+    for parent in range(n_vars):
+        for child in range(n_vars):
+            edge_posteriors[parent][child] = np.logaddexp.reduce(edge_posteriors[parent][child])
+
+    edge_posteriors_matrix = np.zeros((n_vars, n_vars))
+
+    for parent in edge_posteriors:
+        for child in edge_posteriors[parent]:
+            edge_posteriors_matrix[parent, child] = edge_posteriors[parent][child]
+
+    return np.exp(edge_posteriors_matrix)
+
+
+def edge_empirical_prob_max_error(chainpath, dag_col, exact_probs):
+    max_abs_errors = list()
+    with open(chainpath) as f:
+        n = 0
+        DAGs = [DAG_str_to_adjmat(row.strip().split(",")[dag_col]) for row in f.readlines()]
+        DAG_sum = np.zeros(DAGs[0].shape)
+        for DAG in DAGs:
+            n += 1
+            DAG_sum += DAG
+            max_abs_errors.append(np.max(np.abs(DAG_sum/n - exact_probs)))
+    return max_abs_errors
+
+
+def analyze_chain(chainpath, dag_col):
+    with open(chainpath) as f:
+        R = [partition(DAG) for DAG in [DAG_str_to_adjmat(row.strip().split(",")[dag_col]) for row in f.readlines()]]
+        k = [len(Ri) for Ri in R]
+        mu = [len(Rij) for Ri in R for Rij in Ri]
+        ell = [len(R_to_B(Ri, 9)) for Ri in R]
+        return np.mean(k), np.mean(mu), np.mean(ell)
