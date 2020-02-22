@@ -909,8 +909,11 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
         stats["acceptance_prob"].append(acceptance_prob)
         stats["move"].append(move)
 
-    B = map_names(list(scores.keys()),
-                  np.random.choice(list(gen_M_layerings(len(scores.keys()), M)), 1)[0])
+    if len(scores.keys()) == M:
+        B = [frozenset(scores.keys())]
+    else:
+        B = map_names(list(scores.keys()),
+                      np.random.choice(list(gen_M_layerings(len(scores.keys()), M)), 1)[0])
 
     stay_prob = 0.01
 
