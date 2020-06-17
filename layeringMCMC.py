@@ -1,8 +1,10 @@
+import sys
 import math
-import numpy as np
 from itertools import chain, combinations
 import time
 from collections import defaultdict
+
+import numpy as np
 
 
 def structure_to_str(structure):
@@ -24,17 +26,6 @@ def nCr(n, r):
     return f(n) // f(r) // f(n-r)
 
 
-# https://stackoverflow.com/questions/46374185/does-python-have-a-function-which-computes-multinomial-coefficients
-def multinomial(lst):
-    res, i = 1, 1
-    for a in lst:
-        for j in range(1, a+1):
-            res *= i
-            res //= j
-            i += 1
-    return res
-
-
 def partitions(n):
     div_sets = list(subsets(range(1, n), 0, n-1))
     for divs in div_sets:
@@ -48,23 +39,6 @@ def partitions(n):
         else:
             partition.append(list(range(n)))
         yield partition
-
-
-def n_dags(n_nodes, max_indegree):
-    n_cache = list()
-    for m in range(n_nodes + 1):
-        if m < 2:
-            n_cache.append(1)
-            continue
-        res = 0
-        for k in range(1, m+1):
-            term = 0
-            for d in range(max_indegree + 1):
-                term += nCr(m-k, d)
-            term = term ** k
-            res += (-1) ** (k-1) * nCr(m, k) * term * n_cache[m - k]
-        n_cache.append(res)
-    return n_cache[n_nodes]
 
 
 def read_jkl(scorepath):
@@ -118,16 +92,36 @@ def map_names(names, B):
     return new_B
 
 
-def logminus(p1, p2):
-    # p1 bigger log prob
-    # p2 smaller log prob
+def log_minus_exp(p1, p2):
+    if np.exp(min(p1, p2)-max(p1, p2)) == 1:
+        return -float("inf")
+    return max(p1, p2) + np.log1p(-np.exp(min(p1, p2)-max(p1, p2)))
 
-    if p1-p2 == 0:
-        # Is this ok?
-        # I suppose it doesn't hurt even if we falsely go to the final return?
-        # This doesn't return false positives?
-        return -float('inf')
-    return max(p1, p2) + np.log1p(-np.exp(-abs(p1-p2)))
+
+def valid_layering(B, M):
+    if min([len(B[j]) for j in range(len(B))]) == 0:
+        return False
+    if len(B) == 1:
+        return True
+    psums = list()
+    for j in range(1, len(B)):
+        psums.append(len(B[j-1]) + len(B[j]))
+    if min(psums) <= M:
+        return False
+    return True
+
+
+def R_to_B(R, M):
+    B = list()
+    B_layer = R[0]
+    for i in range(1, len(R)):
+        if len(B_layer) + len(R[i]) <= M:
+            B_layer = B_layer.union(R[i])
+        else:
+            B.append(B_layer)
+            B_layer = R[i]
+    B.append(B_layer)
+    return B
 
 
 def sample_DAG(R, scores, max_indegree):
@@ -151,6 +145,66 @@ def sample_DAG(R, scores, max_indegree):
     return DAG, sum(tmp_scores)
 
 
+def generate_partition(B, M, tau_hat, g, pi_v):
+
+    l = len(B)
+    B = [frozenset()] + B + [frozenset()]
+    R = list()
+
+    j = 0
+    D = frozenset()
+    T = frozenset()
+    k = 0
+
+    p = dict()
+    f = dict()
+
+    while j <= l:
+        if D == B[j]:
+            j_prime = j+1
+            D_prime = frozenset()
+        else:
+            j_prime = j
+            D_prime = D
+
+        if (D.issubset(B[j]) and D != B[j]) or j == l or len(B[j+1]) <= M:
+            S = [frozenset(Si) for Si in subsets(B[j_prime].difference(D_prime), 1, max(1, len(B[j_prime].difference(D_prime))))]
+            A = frozenset()
+        else:
+            S = [B[j+1]]
+            A = B[j+1].difference({min(B[j+1])})
+
+        for v in B[j_prime].difference(D_prime):
+            if not T:
+                p[v] = pi_v[v][frozenset()]
+            else:
+                if T == B[j]:
+                    p[v] = tau_hat[v][frozenset({v})]
+                else:
+                    p[v] = log_minus_exp(tau_hat[v][D], tau_hat[v][D.difference(T)])
+
+        f[A] = 0
+        for v in A:
+            f[A] += p[v]
+
+        r = -1*(np.random.exponential() - g[j][D][T])
+        s = -float('inf')
+        for Si in S:
+            v = min(Si)
+            f[Si] = f[Si.difference({v})] + p[v]
+            if D != B[j] or j == 0 or len(Si) > M - len(B[j]):
+                s = np.logaddexp(s, f[Si] + g[j_prime][D_prime.union(Si)][Si])
+            if s > r:
+                k = k + 1
+                R.append(Si)
+                T = Si
+                D = D_prime.union(Si)
+                break
+        j = j_prime
+
+    return R
+
+
 def parentsums(B, M, max_indegree, pi_v):
 
     tau = dict({v: defaultdict(lambda: -float("inf")) for v in set().union(*B)})
@@ -159,33 +213,33 @@ def parentsums(B, M, max_indegree, pi_v):
     B.append(set())
     for j in range(len(B)-1):
         B_to_j = set().union(*B[:j+1])
-        
+
         for v in B[j+1]:
-            
+
             tmp_dict = defaultdict(list)
             for G_v in subsets(B_to_j, 1, max_indegree):
                 if frozenset(G_v).intersection(B[j]):
                     tmp_dict[v].append(pi_v[v][frozenset(G_v)])
             tau_hat[v].update((frozenset({item[0]}), np.logaddexp.reduce(item[1])) for item in tmp_dict.items())
-        
+
         if len(B[j]) <= M:
             for v in B[j].union(B[j+1]):
-                
+
                 tmp_dict = defaultdict(list)
                 for G_v in subsets(B_to_j.difference({v}), 0, max_indegree):
                     tmp_dict[frozenset(G_v).intersection(B[j])].append(pi_v[v][frozenset(G_v)])
-                
+
                 tau[v].update((item[0], np.logaddexp.reduce(item[1])) for item in tmp_dict.items())
-                
+
                 for D in subsets(B[j].difference({v}), 0, len(B[j].difference({v}))):
                     tau_hat[v][frozenset(D)] = np.logaddexp.reduce(np.array([tau[v][frozenset(C)] for C in subsets(D, 0, len(D))]))
-                    
+
     B.pop()  # drop the added empty set
 
     return tau_hat
 
 
-def pi_B(B, M, max_indegree, pi_v, tau_hat, return_all=False):
+def posterior(B, M, max_indegree, pi_v, tau_hat, return_all=False):
 
     l = len(B)  # l is last proper index
     B = [frozenset()] + B + [frozenset()]
@@ -197,13 +251,13 @@ def pi_B(B, M, max_indegree, pi_v, tau_hat, return_all=False):
 
         if len(B[j]) > M or j == 0:
             P = [(B[j], B[j])]
-        else:                                                  # 5
+        else:
             P = list()
             for D in subsets(B[j], len(B[j]), 1):
                 for T in subsets(D, 1, len(D)):
                     P.append((frozenset(D), frozenset(T)))
 
-        for DT in P:                                           # 6
+        for DT in P:
             D, T = DT
             if D == B[j]:
                 j_prime = j + 1
@@ -212,37 +266,35 @@ def pi_B(B, M, max_indegree, pi_v, tau_hat, return_all=False):
                 j_prime = j
                 D_prime = D
 
-            if D == B[j] and j < l and len(B[j+1]) > M:        # 10
+            if D == B[j] and j < l and len(B[j+1]) > M:
                 S = [B[j+1]]
                 A = B[j+1].difference({min(B[j+1])})
-            else:                                              # 12
+            else:
                 S = [frozenset(Si) for Si in subsets(B[j_prime].difference(D_prime), 1, max(1, len(B[j_prime].difference(D_prime))))]
                 A = frozenset()
 
-            # p = dict() # poistetaan D_prime 3.2.2020
-            for v in B[j_prime].difference(D_prime):                      # 13
+            for v in B[j_prime].difference(D_prime):
                 if not T:
                     p[v] = pi_v[v][frozenset()]
                 else:
                     if T == B[j]:
-                        p[v] = tau_hat[v][frozenset({v})]       # 17
+                        p[v] = tau_hat[v][frozenset({v})]
                     else:
-                        p[v] = logminus(tau_hat[v][D], tau_hat[v][D.difference(T)])
+                        p[v] = log_minus_exp(tau_hat[v][D], tau_hat[v][D.difference(T)])
 
-            # f = dict()
-            f[A] = 0                                            # 19
+            f[A] = 0
             for v in A:
                 f[A] += p[v]
 
             if D not in g[j]:
                 g[j][D] = dict()
-            if not S:                                          # 22
+            if not S:
                 g[j][D][T] = 0.0
             else:
                 g[j][D][T] = -float('inf')
 
             tmp_list = list([g[j][D][T]])
-            for Si in S:                                       # 27
+            for Si in S:
                 v = min(Si)
                 f[Si] = f[Si.difference({v})] + p[v]
                 if D != B[j] or j == 0 or len(Si) > M - len(B[j]):
@@ -255,127 +307,34 @@ def pi_B(B, M, max_indegree, pi_v, tau_hat, return_all=False):
     return g[0][frozenset()][frozenset()]
 
 
-def valid_layering(B, M):
-    if min([len(B[j]) for j in range(len(B))]) == 0:
-        return False
-    if len(B) == 1:
-        return True
-    psums = list()
-    for j in range(1, len(B)):
-        psums.append(len(B[j-1]) + len(B[j]))
-    if min(psums) <= M:
-        return False
-    return True
+def posterior_R(R, scores, max_indegree):
+    """Brute force R score"""
 
+    def possible_psets(U, T, max_indegree):
+        if not U:
+            yield frozenset()
+        for required in subsets(T, 1, max(1, max_indegree)):
+            for additional in subsets(U.difference(T), 0, max_indegree - len(required)):
+                yield frozenset(required).union(additional)
 
-def valid_sources(b, M):
-    # undefined if b, M is invalid
-    valids = np.array([False]*len(b))
-    for j in range(len(b)):
-        if j == 0 or j == len(b)-1:
-            valids[j] = True
-            continue
-        if b[j] > 1:
-            if (b[j]-1 + b[j+1] > M and b[j]-1 + b[j-1] > M-1) or (b[j]-1 + b[j+1] > M-1 and b[j]-1 + b[j-1] > M):
-                # in first case have to add v to prev, in second case have to add v to next
-                valids[j] = True
-        else:
-            # if len(b[j]) == 1 part disappears
-            valids[j] = True
+    def score_v(v, pset, scores):
+        return scores[v][pset]
 
-    return valids
+    def hat_pi(v, U, T, scores, max_indegree):
+        return np.logaddexp.reduce([score_v(v, pset, scores) for pset in possible_psets(U, T, max_indegree)])
 
+    def f(U, T, S, scores, max_indegree):
+        hat_pi_sum = 0
+        for v in S:
+            hat_pi_sum += hat_pi(v, U, T, scores, max_indegree)
+        return hat_pi_sum
 
-def valid_targets(b, j, M):
-
-    # undefined if j is invalid source
-
-    valids = np.array([False]*(2*len(b)+1))
-    b_stripped = [b[i] if i != j else b[i]-1 for i in range(len(b))]
-
-    # 1. forced to place v in certain part
-    for i in range(len(b_stripped)-1):
-        if b_stripped[i] + b_stripped[i+1] <= M and b_stripped[i] != 0 and b_stripped[i+1] != 0:
-            if i == j:
-                valids[(i+2)*2-1] = True
-            else:
-                valids[(i+1)*2-1] = True
-            return valids
-
-    # 2. possibly multiple options where to place v
-    sizes = [0]
-    for s in b_stripped:
-        sizes.append(s)
-        sizes.append(0)
-    for i in range(len(sizes)):
-        if i+1 == (j+1)*2:
-            continue
-        if i == 0:  # first possible new part
-            if sizes[i] + sizes[i+1] >= M:  # uusi layeri
-                valids[i] = True
-        elif i == len(sizes) - 1:  # last possible new part
-            if sizes[i] + sizes[i-1] >= M:
-                valids[i] = True
-        elif i % 2 == 0:  # middle new layers
-            if sizes[i] + sizes[i-1] >= M and sizes[i] + sizes[i+1] >= M:
-                valids[i] = True
-        elif i % 2 != 0:  # existing layers
-            if i == 1:  # first existing part
-                if sizes[i] + sizes[i+2] >= M:
-                    valids[i] = True
-            elif i == len(sizes)-2:  # last existing part
-                if sizes[i] + sizes[i-2] >= M:
-                    valids[i] = True
-            else:  # middle layers
-                if sizes[i] + sizes[i-2] >= M and sizes[i] + sizes[i+2]:
-                    valids[i] = True
-
-    return valids
-
-
-def possible_psets(U, T, max_indegree):
-    if not U:
-        yield frozenset()
-    for required in subsets(T, 1, max(1, max_indegree)):
-        for additional in subsets(U.difference(T), 0, max_indegree - len(required)):
-            yield frozenset(required).union(additional)
-
-
-def score_v(v, pset, scores):
-    return scores[v][pset]
-
-
-def hat_pi(v, U, T, scores, max_indegree):
-    return np.logaddexp.reduce([score_v(v, pset, scores) for pset in possible_psets(U, T, max_indegree)])
-
-
-def f(U, T, S, scores, max_indegree):
-    hat_pi_sum = 0
-    for v in S:
-        hat_pi_sum += hat_pi(v, U, T, scores, max_indegree)
-    return hat_pi_sum
-
-
-def pi_R(R, scores, max_indegree):
     f_sum = 0
     for i in range(len(R)):
         f_sum += f(set().union(*R[:i]),
-                    [R[i-1] if i-1>-1 else set()][0],
-                    R[i], scores, max_indegree)
+                   [R[i-1] if i-1>-1 else set()][0],
+                   R[i], scores, max_indegree)
     return f_sum
-
-
-def R_to_B(R, M):
-    B = list()
-    B_layer = R[0]
-    for i in range(1, len(R)):
-        if len(B_layer) + len(R[i]) <= M:
-            B_layer = B_layer.union(R[i])
-        else:
-            B.append(B_layer)
-            B_layer = R[i]
-    B.append(B_layer)
-    return B
 
 
 def R_basic_move(**kwargs):
@@ -447,9 +406,8 @@ def R_swap_any(**kwargs):
 
 
 def B_swap_nonadjacent(**kwargs):
-    # TODO update docstring to reflect new behaviour
     """Swaps the layer of two nodes in different layers by sampling uniformly at random:
-    1. j and k, j != k
+    1. j \in V and k \in V \setminus {j-1, j, j+1}
     2. nodes in B[j] and B[k]
     and finally swapping the layers of the chosen nodes.
 
@@ -532,6 +490,27 @@ def B_swap_adjacent(**kwargs):
 
 
 def B_relocate_many(**kwargs):
+    """Relocates n > 1 nodes in the input M-layering B by choosing uniformly at random:
+    1. a source layer j from among the valid possibilities,
+    2. number n between 2 and |B[j]|
+    3. n nodes from within the source layer,
+    4. a target layer, including any possible new layer, where to move the nodes.
+
+    In step (1), any layer with more than one node is valid, as the problem of invalid
+    sources described in B_relocate_one can be bypassed by choosing n appropriately.
+    At the moment n however is chosen uniformly from {2,...,|B[j]|} so the move can
+    produce an invalid output (which is later discarded in MCMC function).
+
+    In step (4) only a new layer right after j is discarded as it is clearly invalid.
+    However, as explained, the proposed M-layering can still be invalid.
+
+    Args:
+       B (list): Initial state of the layering for the relocation transition
+       M (int):  Specifies the space of Bs
+
+    Returns:
+        Proposed new M-layering, proposal probability and reverse proposal probability
+    """
 
     def valid():
         return len(B) > 1 and len(valid_sources) > 0
@@ -583,14 +562,19 @@ def B_relocate_many(**kwargs):
 
 def B_relocate_one(**kwargs):
     """Relocates a single node in the input M-layering B by choosing uniformly at random:
-    1. a source part from among the valid possibilities,
-    2. a node within the source part,
-    3. a valid target part, including any possible new part, where to move the node.
+    1. a source layer from among the valid possibilities,
+    2. a node within the source layer,
+    3. a valid target layer, including any possible new layer, where to move the node.
 
     In step (1), only such layers are valid, from which it is possible to draw a node,
-    and create a valid new M-layering by moving it to another part. In step (3) the possible
-    target layers depend on the source part sampled in step (1). The proposed M-layering
-    is thus guaranteed to be valid and different from the input M-layering.
+    and create a valid new M-layering by moving it to another part. If the sizes of three
+    consequetive layers are b_1, b_2, b_3, such that b_1 + (b_2 - 1) = M = (b_2 - 1) + b_3,
+    then it is impossible to create a valid layering by relocating one node from the middle layer
+    as to get a valid layering one should also merge the left or the right layer
+    with the remaining middle layer.
+
+    In step (3) the possible target layers depend on the source part sampled in step (1).
+    The proposed M-layering is thus guaranteed to be valid and different from the input M-layering.
 
     Args:
        B (list): Initial state of the layering for the relocation transition
@@ -601,6 +585,68 @@ def B_relocate_one(**kwargs):
     """
     def valid():
         return len(B) > 1
+
+    def valid_sources(b, M):
+        # undefined if b, M is invalid
+        valids = np.array([False]*len(b))
+        for j in range(len(b)):
+            if j == 0 or j == len(b)-1:
+                valids[j] = True
+                continue
+            if b[j] > 1:
+                if (b[j]-1 + b[j+1] > M and b[j]-1 + b[j-1] > M-1) or (b[j]-1 + b[j+1] > M-1 and b[j]-1 + b[j-1] > M):
+                    valids[j] = True
+            else:
+                # if len(b[j]) == 1 part disappears
+                valids[j] = True
+
+        return valids
+
+    def valid_targets(b, j, M):
+
+        # undefined if j is invalid source
+
+        valids = np.array([False]*(2*len(b)+1))
+        b_stripped = [b[i] if i != j else b[i]-1 for i in range(len(b))]
+
+        # 1. forced to place v in certain part
+        for i in range(len(b_stripped)-1):
+            if b_stripped[i] + b_stripped[i+1] <= M and b_stripped[i] != 0 and b_stripped[i+1] != 0:
+                if i == j:
+                    valids[(i+2)*2-1] = True
+                else:
+                    valids[(i+1)*2-1] = True
+                return valids
+
+        # 2. possibly multiple options where to place v
+        sizes = [0]
+        for s in b_stripped:
+            sizes.append(s)
+            sizes.append(0)
+        for i in range(len(sizes)):
+            if i+1 == (j+1)*2:
+                continue
+            if i == 0:  # first possible new part
+                if sizes[i] + sizes[i+1] >= M:  # new layer
+                    valids[i] = True
+            elif i == len(sizes) - 1:  # last possible new part
+                if sizes[i] + sizes[i-1] >= M:
+                    valids[i] = True
+            elif i % 2 == 0:  # middle new layers
+                if sizes[i] + sizes[i-1] >= M and sizes[i] + sizes[i+1] >= M:
+                    valids[i] = True
+            elif i % 2 != 0:  # existing layers
+                if i == 1:  # first existing part
+                    if sizes[i] + sizes[i+2] >= M:
+                        valids[i] = True
+                elif i == len(sizes)-2:  # last existing part
+                    if sizes[i] + sizes[i-2] >= M:
+                        valids[i] = True
+                else:  # middle layers
+                    if sizes[i] + sizes[i-2] >= M and sizes[i] + sizes[i+2]:
+                        valids[i] = True
+
+        return valids
 
     B = kwargs["B"]
     M = kwargs["M"]
@@ -641,221 +687,6 @@ def B_relocate_one(**kwargs):
 
     q = 1/(sum(possible_sources)*b[source]*sum(possible_targets))
     q_rev = 1/(sum(valid_sources(b_prime, M))*b_prime[rev_source]*sum(valid_targets(b_prime, rev_source, M)))
-
-    return B_prime, q, q_rev
-
-
-def relocate_weighted(B, M):
-    """Same as :py:func`relocate_uniform`, but in step (1) the possible source 
-    layers are given probability proportional to their size (i.e., number of nodes in them),
-    and in step (3) the target layers are given probability proportional to their size+1,
-    where +1 is needed to make new layers possible.
-
-    Args:
-       B (list): Initial state of the layering for the relocation transition
-       M (int):  Specifies the space of Bs
-
-    Returns:
-        Proposed new M-layering, proposal probability and reverse proposal probability
-    """
-    
-    b = [len(part) for part in B]        
-    possible_sources = valid_sources(b, M)
-    possible_sources = np.nonzero(possible_sources)[0]
-    n_valid_sources = sum([b[i] for i in possible_sources])
-    source = np.random.choice(possible_sources, p=[b[i]/n_valid_sources for i in possible_sources])
-    possible_targets = valid_targets(b, source, M)
-    possible_targets = np.nonzero(possible_targets)[0]
-    target_normalizer = sum([b[i//2]+1 if i % 2 == 1 else 1 for i in possible_targets])
-    target = np.random.choice(possible_targets, p=[(b[i//2]+1)/target_normalizer
-                                                   if i % 2 == 1 else 1/target_normalizer
-                                                   for i in possible_targets])
-
-    v = np.random.choice(list(B[source]))
-
-    B_prime = [part.difference({v}) for part in B]
-
-    # Add v to target
-    rev_source = 0
-    if target % 2 == 1:  # add to existing part
-        B_prime[target//2] = B_prime[target//2].union({v})
-        rev_source = target//2
-    else:  # add to new part
-        if target == 0:
-            B_prime = [frozenset({v})] + B_prime
-            rev_source = 0
-        else:  # new part after target//2
-            B_prime = B_prime[0:target//2+1] + [frozenset({v})] + B_prime[target//2+1:]
-            rev_source = target//2
-
-    # delete possible 0 layers and adjust rev_source accordingly
-    for i in range(len(B_prime)):
-        if len(B_prime[i]) == 0:
-            del B_prime[i]
-            if i < rev_source:
-                rev_source -= 1
-            break  # there can be max 1 0-part
-
-    b_prime = [len(part) for part in B_prime]
-
-    rev_possible_sources = valid_sources(b_prime, M)
-    rev_possible_sources = np.nonzero(rev_possible_sources)[0]
-    rev_n_valid_sources = sum([b_prime[i] for i in rev_possible_sources])
-    rev_possible_targets = valid_targets(b_prime, rev_source, M)
-    rev_possible_targets = np.nonzero(rev_possible_targets)[0]
-    rev_target_normalizer = sum([b_prime[i//2] if i % 2 == 1 else 1 for i in rev_possible_targets])
-
-    q = (1/n_valid_sources)*([b[target//2]+1 if target % 2 == 1 else 1][0]/target_normalizer)
-    q_rev = (1/rev_n_valid_sources)*(b[source]/rev_target_normalizer)
-
-    return B_prime, q, q_rev
-
-
-def relocate_weighted_inverse(B, M):
-    """Same as :py:func`relocate_uniform`, but in step (1) the possible source 
-    layers are given probability proportional to their size (i.e., number of nodes in them),
-    and in step (3) the target layers are given probability inversely proportional to their size+1,
-    where +1 is needed to avoid 0-division for new layers.
-
-    Args:
-       B (list): Initial state of the layering for the relocation transition
-       M (int):  Specifies the space of Bs
-
-    Returns:
-        Proposed new M-layering, proposal probability and reverse proposal probability
-    """
-
-    b = [len(part) for part in B]
-    possible_sources = valid_sources(b, M)
-    possible_sources = np.nonzero(possible_sources)[0]
-    n_valid_sources = sum([b[i] for i in possible_sources])
-    source = np.random.choice(possible_sources, p=[b[i]/n_valid_sources for i in possible_sources])
-    possible_targets = valid_targets(b, source, M)
-    possible_targets = np.nonzero(possible_targets)[0]
-    target_normalizer = sum([1/(b[i//2]+1) if i % 2 == 1 else 1 for i in possible_targets])
-    target = np.random.choice(possible_targets, p=[(1/(b[i//2]+1))/target_normalizer
-                                                   if i % 2 == 1 else 1/target_normalizer
-                                                   for i in possible_targets])
-
-    v = np.random.choice(list(B[source]))
-
-    B_prime = [part.difference({v}) for part in B]
-
-    # Add v to target
-    rev_source = 0
-    if target % 2 == 1:  # add to existing part
-        B_prime[target//2] = B_prime[target//2].union({v})
-        rev_source = target//2
-    else:  # add to new part
-        if target == 0:
-            B_prime = [frozenset({v})] + B_prime
-            rev_source = 0
-        else:  # new part after target//2
-            B_prime = B_prime[0:target//2+1] + [frozenset({v})] + B_prime[target//2+1:]
-            rev_source = target//2
-
-    # delete possible 0 layers and adjust rev_source accordingly
-    for i in range(len(B_prime)):
-        if len(B_prime[i]) == 0:
-            del B_prime[i]
-            if i < rev_source:
-                rev_source -= 1
-            break  # there can be max 1 0-part
-
-    b_prime = [len(part) for part in B_prime]
-
-    rev_possible_sources = valid_sources(b_prime, M)
-    rev_possible_sources = np.nonzero(rev_possible_sources)[0]
-    rev_n_valid_sources = sum([b_prime[i] for i in rev_possible_sources])
-    rev_possible_targets = valid_targets(b_prime, rev_source, M)
-    rev_possible_targets = np.nonzero(rev_possible_targets)[0]
-    rev_target_normalizer = sum([1/(b_prime[i//2]+1) if i % 2 == 1 else 1 for i in rev_possible_targets])
-
-    q = (1/n_valid_sources)*([1/(b[target//2]+1) if target % 2 == 1 else 1][0]/target_normalizer)
-    q_rev = (1/rev_n_valid_sources)*((1/b[source])/rev_target_normalizer)
-
-    return B_prime, q, q_rev
-
-
-def relocate_validate(B, M):
-    """Relocates a single node in the input M-layering B by choosing uniformly at random:
-    1. a source part from among every existing part,
-    2. a node within the source part,
-    3. a target part, including any possible new part, where to move the node.
-
-    Then
-
-    4. If the previous 3 steps produced an invalid M-layering, the layering is made valid
-    by combining adjacent layers starting from the beginning.
-
-    In contrast to the other relocate moves, this might then return the same M-layering
-    that was given as input.
-
-    Args:
-       B (list): Initial state of the layering for the relocation transition
-       M (int):  Specifies the space of Bs
-
-    Returns:
-        Proposed new M-layering, proposal probability and reverse proposal probability
-    """
-
-    b = [len(part) for part in B]
-    source = np.random.choice(range(len(B)))
-    target = np.random.choice(range(len(B)*2+1))
-    v = np.random.choice(list(B[source]))
-    B_prime = [part.difference({v}) for part in B]
-
-    # Add v to target
-    rev_source = 0
-    if target % 2 == 1:  # add to existing part
-        B_prime[target//2] = B_prime[target//2].union({v})
-        rev_source = target//2
-    else:  # add to new part
-        if target == 0:
-            B_prime = [frozenset({v})] + B_prime
-            rev_source = 0
-        else:  # new part after target//2
-            B_prime = B_prime[0:target//2+1] + [frozenset({v})] + B_prime[target//2+1:]
-            rev_source = target//2
-
-    # delete possible 0 layers and adjust rev_source accordingly
-    for i in range(len(B_prime)):
-        if len(B_prime[i]) == 0:
-            del B_prime[i]
-            if i < rev_source:
-                rev_source -= 1
-            break  # there can be max 1 0-part
-
-    # merge adjacent layers if their combined size is less or equal to M
-    # and adjust rev_source accordingly
-    i = 0
-    while i < len(B_prime) - 1:
-        j = i+1
-        layersum = len(B_prime[i])
-        while j < len(B_prime) and layersum + len(B_prime[j]) <= M:
-            layersum += len(B_prime[j])
-            j += 1
-        if layersum != len(B_prime[i]):
-            B_prime[i] = frozenset().union(*B_prime[i:j])
-            for k in range(j-1-i):
-                if i+1 < len(B_prime):
-                    del B_prime[i+1]
-                if i+1 < rev_source:
-                    rev_source -= 1
-        i += 1
-
-    # Something wrong with rev_source adjustment above
-    # so lets brute-force
-    for i in range(len(B_prime)):
-        if v in B_prime[i]:
-            rev_source = i
-        
-    b_prime = [len(part) for part in B_prime]
-
-    q = 1/(len(B)*b[source]*(len(B)*2+1))
-    # print('B_prime {}'.format(B_prime))
-    # print('v {}, rev_source {}'.format(v, rev_source))
-    q_rev = 1/(len(B_prime)*b_prime[rev_source]*(len(B_prime)*2+1))
 
     return B_prime, q, q_rev
 
@@ -907,7 +738,7 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
     t_psum = time.process_time() - t_psum
 
     t_pos = time.process_time()
-    g = pi_B(B, M, max_indegree, scores, tau_hat, return_all=True)
+    g = posterior(B, M, max_indegree, scores, tau_hat, return_all=True)
     B_prob = g[0][frozenset()][frozenset()]
     t_pos = time.process_time() - t_pos
 
@@ -962,7 +793,7 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
                 t_psum = time.process_time() - t_psum
 
                 t_pos = time.process_time()
-                g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
+                g_prime = posterior(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
                 B_prime_prob = g_prime[0][frozenset()][frozenset()]
                 t_pos = time.process_time() - t_pos
 
@@ -985,15 +816,15 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
                 tau_hat_prime = parentsums(B_prime, M, max_indegree, scores)
                 t_psum = time.process_time() - t_psum
 
-                R_prob = pi_R(R, scores, max_indegree)
-                R_prime_prob = pi_R(R_prime, scores, max_indegree)
+                R_prob = posterior_R(R, scores, max_indegree)
+                R_prime_prob = posterior_R(R_prime, scores, max_indegree)
 
                 acc_prob = np.exp(R_prime_prob - R_prob)*q_rev/q
 
             if np.random.rand() < acc_prob:
 
                 t_pos = time.process_time()
-                g_prime = pi_B(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
+                g_prime = posterior(B_prime, M, max_indegree, scores, tau_hat_prime, return_all=True)
                 B_prime_prob = g_prime[0][frozenset()][frozenset()]
                 t_pos = time.process_time() - t_pos
 
@@ -1015,158 +846,16 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
     return stats
 
 
-def generate_partition(B, M, tau_hat, g, pi_v):
+if __name__ == '__main__':
+    args = sys.argv[1:]
+    if len(args) < 5:
+        print("Usage: python layeringMCMC.py scorepath M max_indegree iterations seed")
+        exit()
 
-    l = len(B)
-    B = [frozenset()] + B + [frozenset()]
-    R = list()
+    scores = read_jkl(args[0])
+    M = int(args[1])
+    max_indegree = int(args[2])
+    iterations = int(args[3])
+    seed = int(args[4])
 
-    j = 0
-    D = frozenset()
-    T = frozenset()
-    k = 0
-
-    p = dict()
-    f = dict()
-
-    while j <= l:
-        if D == B[j]:
-            j_prime = j+1
-            D_prime = frozenset()
-        else:
-            j_prime = j
-            D_prime = D
-
-        if (D.issubset(B[j]) and D != B[j]) or j == l or len(B[j+1]) <= M:
-            S = [frozenset(Si) for Si in subsets(B[j_prime].difference(D_prime), 1, max(1, len(B[j_prime].difference(D_prime))))]
-            A = frozenset()
-        else:
-            S = [B[j+1]]
-            A = B[j+1].difference({min(B[j+1])})
-
-        for v in B[j_prime].difference(D_prime):
-            if not T:
-                p[v] = pi_v[v][frozenset()]
-            else:
-                if T == B[j]:
-                    p[v] = tau_hat[v][frozenset({v})]
-                else:
-                    p[v] = logminus(tau_hat[v][D], tau_hat[v][D.difference(T)])
-
-        f[A] = 0
-        for v in A:
-            f[A] += p[v]
-
-        # https://stats.stackexchange.com/questions/234544/from-uniform-distribution-to-exponential-distribution-and-vice-versa
-        r = -1*(np.random.exponential() - g[j][D][T])
-        s = -float('inf')
-        for Si in S:
-            v = min(Si)
-            f[Si] = f[Si.difference({v})] + p[v]
-            if D != B[j] or j == 0 or len(Si) > M - len(B[j]):
-                s = np.logaddexp(s, f[Si] + g[j_prime][D_prime.union(Si)][Si])
-            if s > r:
-                k = k + 1
-                R.append(Si)
-                T = Si
-                D = D_prime.union(Si)
-                break
-        j = j_prime
-
-    return R
-
-
-def partition(matrix):
-    """Partition from adjacency matrix
-    """
-    partitions = list()
-    indices = np.arange(0, len(matrix))
-    while True:
-        pmask = np.sum(matrix, axis=0) == 0
-        if not any(pmask):
-            break
-        matrix = matrix[:, pmask == False][pmask == False, :]
-        partitions.append(indices[pmask])
-        indices = indices[pmask == False]
-    return partitions
-
-
-def DAG_str_to_adjmat(DAG_str):
-
-    node_psets = [np.array([int(node) for node in node_pset.split()])
-                  for node_pset in DAG_str.split("|")]
-
-    min_node = min([min(node_pset) for node_pset in node_psets])
-    max_node = max([max(node_pset) for node_pset in node_psets])
-
-    if min_node == 1:
-        node_psets = [node_pset - 1 for node_pset in node_psets]
-    else:
-        max_node += 1
-
-    matrix = np.zeros((max_node, max_node))
-
-    for node_pset in node_psets:
-        node = node_pset[0]
-        parents = node_pset[1:]
-        for parent in parents:
-            matrix[parent, node] = 1
-
-    return matrix
-
-
-def edge_posteriors(pset_posteriors_path):
-
-    posteriors = read_jkl(pset_posteriors_path)
-    for node in posteriors:
-        normalizer = np.logaddexp.reduce(list(posteriors[node].values()))
-        for pset in posteriors[node]:
-            posteriors[node][pset] -= normalizer
-
-    n_vars = len(posteriors.keys())
-
-    if min(posteriors.keys()) == 1:
-        adj = -1
-    else:
-        adj = 0
-
-    edge_posteriors = dict({v: dict({v: list() for v in range(n_vars)}) for v in range(n_vars)})
-
-    for child in posteriors:
-        for pset in posteriors[child]:
-            for parent in pset:
-                edge_posteriors[parent + adj][child + adj].append(posteriors[child][pset])
-
-    for parent in range(n_vars):
-        for child in range(n_vars):
-            edge_posteriors[parent][child] = np.logaddexp.reduce(edge_posteriors[parent][child])
-
-    edge_posteriors_matrix = np.zeros((n_vars, n_vars))
-
-    for parent in edge_posteriors:
-        for child in edge_posteriors[parent]:
-            edge_posteriors_matrix[parent, child] = edge_posteriors[parent][child]
-
-    return np.exp(edge_posteriors_matrix)
-
-
-def edge_empirical_prob_max_error(chainpath, dag_col, exact_probs):
-    max_abs_errors = list()
-    with open(chainpath) as f:
-        n = 0
-        DAGs = [DAG_str_to_adjmat(row.strip().split(",")[dag_col]) for row in f.readlines()]
-        DAG_sum = np.zeros(DAGs[0].shape)
-        for DAG in DAGs:
-            n += 1
-            DAG_sum += DAG
-            max_abs_errors.append(np.max(np.abs(DAG_sum/n - exact_probs)))
-    return max_abs_errors
-
-
-def analyze_chain(chainpath, dag_col):
-    with open(chainpath) as f:
-        R = [partition(DAG) for DAG in [DAG_str_to_adjmat(row.strip().split(",")[dag_col]) for row in f.readlines()]]
-        k = [len(Ri) for Ri in R]
-        mu = [len(Rij) for Ri in R for Rij in Ri]
-        ell = [len(R_to_B(Ri, 9)) for Ri in R]
-        return np.mean(k), np.mean(mu), np.mean(ell)
+    MCMC(M, iterations, max_indegree, scores, seed=seed, print_steps=True)
