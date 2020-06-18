@@ -728,9 +728,10 @@ def MCMC(M, iterations, max_indegree, scores, print_steps=False, seed=None):
 
     stay_prob = 0.01
 
-    stats_keys = ["B_prob", "DAG_prob", "B", "DAG",
-                  "acceptance_prob", "accepted", "move",
+    stats_keys = ["B", "B_prob", "DAG", "DAG_prob",
+                  "move", "accepted", "acceptance_prob",
                   "t_parentsums", "t_posterior"]
+
     stats = {key: list() for key in stats_keys}
 
     t_psum = time.process_time()
